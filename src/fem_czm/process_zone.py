@@ -1,10 +1,9 @@
 """Reusable-source moving process zone with emergent self-limitation.
 
-There is no available-site state, one-shot source rule, or crack-advance source
-refresh. The number of geometrically accessible reusable sources varies with
-crack-tip radius. Their rate is limited by nucleation, finite reload time,
-near-tip dislocation backstress, Peierls transport, Taylor release, recovery and
-escape. Blunting is produced by accumulated glide, not stationary mobile count.
+No finite source inventory is present. Source population follows crack-tip
+geometry; repeat emission is limited by nucleation, reload, near-tip backstress,
+Peierls transport, Taylor release, recovery, escape and crack advance. Blunting
+is driven by accumulated glide rather than stationary mobile population.
 """
 from __future__ import annotations
 
@@ -26,16 +25,15 @@ class ProcessZoneConfig:
     poisson_ratio: float = 0.28
     burgers_vector_m: float = 2.74e-10
     r0_m: float = 1.0e-6
+    background_forest_density_m2: float = 5.0e12
+    process_zone_width_factor: float = 2.0
 
-    # Reusable-source geometry:
     # N_source/system = theta_active * r_eff / source_spacing.
     source_spacing_m: float = 1.0e-6
     source_active_angle_rad: float = math.pi
     source_reload_time_s: float = 1.0e-3
     resolved_emission_fraction: float = 1.0 / math.sqrt(3.0)
 
-    # Mobile and retained lines oppose repeat emission. Only retained lines enter
-    # the unresolved direct crack-shielding integral.
     mobile_source_backstress_fraction: float = 1.0
     backstress_geometry_factor: float = 1.0
     shielding_geometry_factor: float = 1.0
@@ -43,15 +41,14 @@ class ProcessZoneConfig:
 
     mobile_recovery_rate_s: float = 0.0
     max_advection_cfl: float = 0.25
-    # Numerical tolerance, not a physical emission cap. Rates and backstress are
-    # recomputed after each increment; convergence should be checked by reducing it.
+    # Numerical integration tolerance, not a physical emission cap.
     max_emit_increment_per_substep: float = 5.0
     population_activity_floor: float = 1.0e-12
     max_substeps: int = 100_000
 
 
 class ReusableSourceProcessZone:
-    """Expected line counts per unit out-of-plane thickness in moving bins."""
+    """Expected dislocation-line counts per unit out-of-plane thickness."""
 
     def __init__(
         self,
@@ -66,11 +63,12 @@ class ReusableSourceProcessZone:
             raise ValueError("source spacing must be positive")
         if self.cfg.source_reload_time_s < 0.0:
             raise ValueError("source reload time cannot be negative")
+        if self.cfg.background_forest_density_m2 < 0.0:
+            raise ValueError("background forest density cannot be negative")
         self.dx = self.cfg.length_m / self.cfg.n_bins
         self.x = (np.arange(self.cfg.n_bins, dtype=float) + 0.5) * self.dx
         self.mobile = np.zeros((self.cfg.n_systems, self.cfg.n_bins), dtype=float)
         self.retained = np.zeros_like(self.mobile)
-        # Number of line-bin crossings: the irreversible local glide ledger.
         self.slip_count = np.zeros_like(self.mobile)
         self.emitted_total = 0.0
         self.escaped_total = 0.0
@@ -99,20 +97,6 @@ class ReusableSourceProcessZone:
         weights = np.exp(-self.x / max(0.2 * self.cfg.length_m, self.dx))
         return float(np.sum(self.slip_count * weights[None, :]))
 
-    @property
-    def forest_density_m2(self) -> np.ndarray:
-        return np.maximum(
-            self.retained.sum(axis=0) / max(self.dx, 1.0e-300),
-            1.0,
-        )
-
-    @property
-    def mobile_density_m2(self) -> np.ndarray:
-        return np.maximum(
-            self.mobile.sum(axis=0) / max(self.dx, 1.0e-300),
-            0.0,
-        )
-
     def blunted_radius_m(self) -> float:
         return (
             self.cfg.r0_m
@@ -121,8 +105,26 @@ class ReusableSourceProcessZone:
             * self.local_slip_count
         )
 
+    def process_zone_width_m(self) -> float:
+        width = self.cfg.process_zone_width_factor * max(
+            self.blunted_radius_m(), self.cfg.r0_m
+        )
+        return min(max(width, self.cfg.r0_m), self.cfg.length_m)
+
+    @property
+    def forest_density_m2(self) -> np.ndarray:
+        area = max(self.dx * self.process_zone_width_m(), 1.0e-300)
+        return (
+            self.cfg.background_forest_density_m2
+            + np.maximum(self.retained.sum(axis=0), 0.0) / area
+        )
+
+    @property
+    def mobile_density_m2(self) -> np.ndarray:
+        area = max(self.dx * self.process_zone_width_m(), 1.0e-300)
+        return np.maximum(self.mobile.sum(axis=0), 0.0) / area
+
     def geometric_source_count_per_system(self) -> float:
-        # The active source arc cannot exceed the represented process-zone scale.
         radius = min(
             max(self.blunted_radius_m(), self.cfg.r0_m),
             self.cfg.length_m,
@@ -189,10 +191,11 @@ class ReusableSourceProcessZone:
             1.0e11,
         )
         tau_reload = self.cfg.source_reload_time_s
-        if tau_reload > 0.0:
-            lambda_reusable = lambda_site / (1.0 + lambda_site * tau_reload)
-        else:
-            lambda_reusable = lambda_site
+        lambda_reusable = (
+            lambda_site / (1.0 + lambda_site * tau_reload)
+            if tau_reload > 0.0
+            else lambda_site
+        )
         n_source = self.geometric_source_count_per_system()
         lambda_emit = n_source * lambda_reusable
 
@@ -226,12 +229,11 @@ class ReusableSourceProcessZone:
 
     @staticmethod
     def _exchange_exact(m, r, capture_rate, release_rate, h):
-        """Exact two-state mobile<->retained exchange for fixed rates."""
+        """Exact mobile<->retained exchange for fixed first-order rates."""
         total = m + r
         q = capture_rate + release_rate
-        positive = q > 0.0
         equilibrium_mobile = np.where(
-            positive,
+            q > 0.0,
             total * release_rate / np.maximum(q, 1.0e-300),
             m,
         )
@@ -250,10 +252,7 @@ class ReusableSourceProcessZone:
         rates = self._rates(K_drive_Pa_sqrt_m, temperature_K)
         if dt == 0.0:
             return self._diagnostics(
-                *rates,
-                d_emit=0.0,
-                d_escape=0.0,
-                n_substeps=0,
+                *rates, d_emit=0.0, d_escape=0.0, n_substeps=0
             )
 
         emitted_before = self.emitted_total
@@ -292,8 +291,7 @@ class ReusableSourceProcessZone:
             if total_emit_rate > 0.0:
                 h = min(
                     h,
-                    self.cfg.max_emit_increment_per_substep
-                    / total_emit_rate,
+                    self.cfg.max_emit_increment_per_substep / total_emit_rate,
                 )
             h = max(min(h, remaining), tiny)
 
@@ -390,6 +388,12 @@ class ReusableSourceProcessZone:
             "mobile_count": self.mobile_count,
             "retained_count": self.retained_count,
             "local_slip_count": self.local_slip_count,
+            "background_forest_density_m2": float(
+                self.cfg.background_forest_density_m2
+            ),
+            "process_zone_width_m": self.process_zone_width_m(),
+            "forest_density_max_m2": float(np.max(self.forest_density_m2)),
+            "mobile_density_max_m2": float(np.max(self.mobile_density_m2)),
             "K_shield_Pa_sqrt_m": self.shielding_K_Pa_sqrt_m(),
             "r_eff_m": radius,
             "tip_radius_over_r0": radius / self.cfg.r0_m,
@@ -403,6 +407,7 @@ class ReusableSourceProcessZone:
             "encounter_rate_max_s": float(np.max(encounter)),
             "process_zone_substeps": int(n_substeps),
             "stiff_exchange_integrator_active": 1.0,
+            "density_area_normalization_active": 1.0,
             "source_inventory_active": 0.0,
             "source_refresh_active": 0.0,
             "source_geometry_active": 1.0,
@@ -426,25 +431,13 @@ class ReusableSourceProcessZone:
         sample_x = self.x + distance
         for s in range(self.cfg.n_systems):
             self.mobile[s] = np.interp(
-                sample_x,
-                self.x,
-                old_m[s],
-                left=0.0,
-                right=0.0,
+                sample_x, self.x, old_m[s], left=0.0, right=0.0
             )
             self.retained[s] = np.interp(
-                sample_x,
-                self.x,
-                old_r[s],
-                left=0.0,
-                right=0.0,
+                sample_x, self.x, old_r[s], left=0.0, right=0.0
             )
             self.slip_count[s] = np.interp(
-                sample_x,
-                self.x,
-                old_g[s],
-                left=0.0,
-                right=0.0,
+                sample_x, self.x, old_g[s], left=0.0, right=0.0
             )
         return {
             "wake_mobile": float(old_m.sum() - self.mobile.sum()),
