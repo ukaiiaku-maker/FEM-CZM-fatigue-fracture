@@ -25,16 +25,25 @@ spacing. A sharper tip samples a shorter arc and therefore fewer sources; a
 blunter tip samples more. The expected population may be fractional. This is a
 geometric source density, not a consumable inventory.
 
-A reusable source has a nucleation waiting time and a reload/reconstruction time:
+A reusable source has a nucleation waiting time and a reload/reconstruction time.
+The directed source rate is evaluated by detailed balance:
 
 ```text
-rate_per_source = lambda_nuc / (1 + lambda_nuc tau_reload).
+lambda_net = lambda_forward/(1 + lambda_forward tau_reload)
+           - lambda_reverse/(1 + lambda_reverse tau_reload),
 ```
 
-The law approaches the Arrhenius nucleation rate at low hazard and approaches
-`1/tau_reload` at high hazard. Source spacing, active angle, and reload time are
-shared physical parameters exposed on the command line and must be subjected to
-sensitivity analysis before calibration.
+with `lambda_reverse` evaluated on the same emission surface at zero resolved
+source stress. The positive part of `lambda_net` is multiplied by the geometric
+source population. Therefore zero source stress gives exactly zero net same-sign
+emission even though the Arrhenius forward and reverse attempt rates are each
+finite. This prevents a thermal attempt background from being misinterpreted as
+continuous dislocation generation after backstress has shut the source off.
+
+At high positive drive, the reusable forward rate approaches `1/tau_reload`.
+Source spacing, active angle, and reload time are shared physical parameters
+exposed on the command line and must be subjected to sensitivity analysis before
+calibration.
 
 ## Emergent emission suppression
 
