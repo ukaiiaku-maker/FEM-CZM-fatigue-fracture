@@ -1,0 +1,7 @@
+{
+  "schema": "v9.10.2-v9.10.3-independent-four-shape",
+  "active_classes": ["ceramic", "weakT", "DBTT"],
+  "source_inventory_active": false,
+  "source_refresh_active": false,
+  "note": "Exact active values are defined in src/fem_czm/parameters.py; legacy source count and refresh length are provenance only."
+}
