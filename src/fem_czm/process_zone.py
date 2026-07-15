@@ -1,8 +1,11 @@
 """Reusable-source moving process zone with emergent self-limitation.
 
-There is no available-site state, source capacity, one-shot source rule, or
-crack-advance source refresh. Emission is throttled by retained-line backstress,
-direct crack shielding, transport, Taylor release and recovery.
+There is no available-site state, one-shot source rule, or crack-advance source
+refresh.  The number of geometrically accessible reusable sources varies with
+crack-tip radius.  Their rate is limited by nucleation, a finite reload time,
+near-tip dislocation backstress, Peierls transport, Taylor release, recovery and
+escape.  Blunting is produced by accumulated glide, not by stationary mobile
+content.
 """
 from __future__ import annotations
 
@@ -24,15 +27,28 @@ class ProcessZoneConfig:
     poisson_ratio: float = 0.28
     burgers_vector_m: float = 2.74e-10
     r0_m: float = 1.0e-6
-    source_strength_per_system: float = 1.0
+
+    # Reusable-source geometry.  For the reduced 2-D front, sources are counted
+    # along an active tip arc.  N_source = theta_active*r_eff/source_spacing.
+    # Expected source populations may be fractional.  These are shared physical
+    # parameters, not class-specific fitted source inventories.
+    source_spacing_m: float = 1.0e-6
+    source_active_angle_rad: float = math.pi
+    source_reload_time_s: float = 1.0e-3
     resolved_emission_fraction: float = 1.0 / math.sqrt(3.0)
+
+    # All near-tip dislocations oppose repeat emission from the same source
+    # system.  Only retained lines contribute to direct crack K shielding.
+    mobile_source_backstress_fraction: float = 1.0
     backstress_geometry_factor: float = 1.0
     shielding_geometry_factor: float = 1.0
     core_radius_m: float = 2.74e-10
+
     mobile_recovery_rate_s: float = 0.0
     max_substep_rate_dt: float = 0.15
     max_advection_cfl: float = 0.25
-    max_substeps: int = 256
+    max_emit_increment_per_substep: float = 0.25
+    max_substeps: int = 100_000
 
 
 class ReusableSourceProcessZone:
@@ -43,10 +59,17 @@ class ReusableSourceProcessZone:
         self.cfg = config or ProcessZoneConfig()
         if self.cfg.n_bins < 4 or self.cfg.n_systems < 1:
             raise ValueError("process zone requires at least four bins and one slip system")
+        if self.cfg.source_spacing_m <= 0.0:
+            raise ValueError("source spacing must be positive")
+        if self.cfg.source_reload_time_s < 0.0:
+            raise ValueError("source reload time cannot be negative")
         self.dx = self.cfg.length_m / self.cfg.n_bins
         self.x = (np.arange(self.cfg.n_bins, dtype=float) + 0.5) * self.dx
         self.mobile = np.zeros((self.cfg.n_systems, self.cfg.n_bins), dtype=float)
         self.retained = np.zeros_like(self.mobile)
+        # Number of line-bin crossings.  This is the local irreversible glide
+        # ledger used for blunting; merely waiting near the tip does not blunt it.
+        self.slip_count = np.zeros_like(self.mobile)
         self.emitted_total = 0.0
         self.escaped_total = 0.0
         self.time_s = 0.0
@@ -55,6 +78,7 @@ class ReusableSourceProcessZone:
         other = ReusableSourceProcessZone(self.material, self.cfg)
         other.mobile = self.mobile.copy()
         other.retained = self.retained.copy()
+        other.slip_count = self.slip_count.copy()
         other.emitted_total = self.emitted_total
         other.escaped_total = self.escaped_total
         other.time_s = self.time_s
@@ -69,6 +93,11 @@ class ReusableSourceProcessZone:
         return float(self.retained.sum())
 
     @property
+    def local_slip_count(self) -> float:
+        weights = np.exp(-self.x / max(0.2 * self.cfg.length_m, self.dx))
+        return float(np.sum(self.slip_count * weights[None, :]))
+
+    @property
     def forest_density_m2(self) -> np.ndarray:
         return np.maximum(self.retained.sum(axis=0) / max(self.dx, 1.0e-300), 1.0)
 
@@ -76,19 +105,40 @@ class ReusableSourceProcessZone:
     def mobile_density_m2(self) -> np.ndarray:
         return np.maximum(self.mobile.sum(axis=0) / max(self.dx, 1.0e-300), 0.0)
 
+    def blunted_radius_m(self) -> float:
+        return self.cfg.r0_m + self.material.state.c_blunt * self.cfg.burgers_vector_m * self.local_slip_count
+
+    def geometric_source_count_per_system(self) -> float:
+        # The active source arc cannot extend beyond the represented process zone.
+        radius = min(max(self.blunted_radius_m(), self.cfg.r0_m), self.cfg.length_m)
+        arc_length = max(self.cfg.source_active_angle_rad, 0.0) * radius
+        return float(arc_length / self.cfg.source_spacing_m)
+
     def source_backstress_Pa(self) -> np.ndarray:
-        pref = self.cfg.backstress_geometry_factor * self.cfg.shear_modulus_Pa * self.cfg.burgers_vector_m / (2.0 * math.pi * (1.0 - self.cfg.poisson_ratio))
+        pref = (
+            self.cfg.backstress_geometry_factor
+            * self.cfg.shear_modulus_Pa
+            * self.cfg.burgers_vector_m
+            / (2.0 * math.pi * (1.0 - self.cfg.poisson_ratio))
+        )
         kernel = 1.0 / np.maximum(self.x + self.cfg.core_radius_m, self.cfg.core_radius_m)
-        return pref * (self.retained @ kernel)
+        resisting_content = self.retained + self.cfg.mobile_source_backstress_fraction * self.mobile
+        return pref * (resisting_content @ kernel)
 
     def shielding_K_Pa_sqrt_m(self) -> float:
-        pref = self.cfg.shielding_geometry_factor * self.cfg.shear_modulus_Pa * self.cfg.burgers_vector_m / (2.0 * (1.0 - self.cfg.poisson_ratio) * math.sqrt(2.0 * math.pi))
-        return float(pref * np.sum(self.retained.sum(axis=0) / np.sqrt(np.maximum(self.x, self.cfg.core_radius_m))))
-
-    def blunted_radius_m(self) -> float:
-        weights = np.exp(-self.x / max(0.2 * self.cfg.length_m, self.dx))
-        local_count = float(np.sum((self.mobile + self.retained) * weights[None, :]))
-        return self.cfg.r0_m + self.material.state.c_blunt * self.cfg.burgers_vector_m * local_count
+        pref = (
+            self.cfg.shielding_geometry_factor
+            * self.cfg.shear_modulus_Pa
+            * self.cfg.burgers_vector_m
+            / (2.0 * (1.0 - self.cfg.poisson_ratio) * math.sqrt(2.0 * math.pi))
+        )
+        return float(
+            pref
+            * np.sum(
+                self.retained.sum(axis=0)
+                / np.sqrt(np.maximum(self.x, self.cfg.core_radius_m))
+            )
+        )
 
     def effective_tip_stress_Pa(self, K_drive_Pa_sqrt_m: float) -> float:
         K_eff = max(float(K_drive_Pa_sqrt_m) - self.shielding_K_Pa_sqrt_m(), 0.0)
@@ -97,82 +147,254 @@ class ReusableSourceProcessZone:
     def _rates(self, K_drive_Pa_sqrt_m: float, temperature_K: float):
         sigma_tip = self.effective_tip_stress_Pa(K_drive_Pa_sqrt_m)
         tau_back = self.source_backstress_Pa()
-        source_stress = np.maximum(self.cfg.resolved_emission_fraction * sigma_tip - tau_back, 0.0)
-        lambda_emit, G_emit = arrhenius_rate_s(source_stress, temperature_K, self.material.emission, 1.0e11)
-        lambda_emit = self.cfg.source_strength_per_system * lambda_emit
+        source_stress = np.maximum(
+            self.cfg.resolved_emission_fraction * sigma_tip - tau_back,
+            0.0,
+        )
+        lambda_site, G_emit = arrhenius_rate_s(
+            source_stress,
+            temperature_K,
+            self.material.emission,
+            1.0e11,
+        )
+        # A reusable source requires both a successful nucleation and a reload.
+        # This harmonic waiting-time law approaches lambda_site at low hazard and
+        # 1/tau_reload at high hazard without consuming a finite source inventory.
+        tau_reload = self.cfg.source_reload_time_s
+        if tau_reload > 0.0:
+            lambda_reusable = lambda_site / (1.0 + lambda_site * tau_reload)
+        else:
+            lambda_reusable = lambda_site
+        n_source = self.geometric_source_count_per_system()
+        lambda_emit = n_source * lambda_reusable
+
         rho_f = self.forest_density_m2
         rho_m = self.mobile_density_m2
-        pt = evaluate_pt_rates(np.full_like(rho_f, sigma_tip), rho_f, rho_m, temperature_K, self.cfg.burgers_vector_m, self.material)
+        pt = evaluate_pt_rates(
+            np.full_like(rho_f, sigma_tip),
+            rho_f,
+            rho_m,
+            temperature_K,
+            self.cfg.burgers_vector_m,
+            self.material,
+        )
         velocity = pt.jump_length_m * pt.series_s
-        encounter = self.material.state.encounter_efficiency * velocity * np.sqrt(rho_f)
-        return sigma_tip, source_stress, lambda_emit, G_emit, pt, velocity, encounter
+        encounter = (
+            self.material.state.encounter_efficiency
+            * velocity
+            * np.sqrt(rho_f)
+        )
+        return (
+            sigma_tip,
+            source_stress,
+            lambda_emit,
+            lambda_site,
+            G_emit,
+            n_source,
+            pt,
+            velocity,
+            encounter,
+        )
 
     def evolve(self, dt_s: float, temperature_K: float, K_drive_Pa_sqrt_m: float) -> dict[str, float]:
         dt = max(float(dt_s), 0.0)
+        rates = self._rates(K_drive_Pa_sqrt_m, temperature_K)
         if dt == 0.0:
-            sigma_tip, source_stress, lam, G, pt, velocity, encounter = self._rates(K_drive_Pa_sqrt_m, temperature_K)
-            return self._diagnostics(sigma_tip, source_stress, lam, G, pt, velocity, encounter, 0.0)
-        sigma_tip, source_stress, lam, G, pt, velocity, encounter = self._rates(K_drive_Pa_sqrt_m, temperature_K)
-        max_rate = max(float(np.max(encounter)), float(np.max(pt.taylor_net_s)), self.material.state.retained_recovery_rate_s, self.cfg.mobile_recovery_rate_s, 1.0e-30)
-        max_velocity = max(float(np.max(velocity)), 0.0)
-        n_rate = int(math.ceil(dt * max_rate / self.cfg.max_substep_rate_dt))
-        n_cfl = int(math.ceil(dt * max_velocity / max(self.dx * self.cfg.max_advection_cfl, 1.0e-300)))
-        nsub = max(1, min(max(n_rate, n_cfl), int(self.cfg.max_substeps)))
-        h = dt / nsub
+            return self._diagnostics(*rates, d_emit=0.0, d_escape=0.0, n_substeps=0)
+
         emitted_before = self.emitted_total
         escaped_before = self.escaped_total
-        for _ in range(nsub):
-            sigma_tip, source_stress, lam, G, pt, velocity, encounter = self._rates(K_drive_Pa_sqrt_m, temperature_K)
-            self.mobile[:, 0] += lam * h
-            self.emitted_total += float(np.sum(lam) * h)
+        remaining = dt
+        n_substeps = 0
+        tiny = max(1.0e-15 * dt, 1.0e-30)
+
+        while remaining > tiny:
+            rates = self._rates(K_drive_Pa_sqrt_m, temperature_K)
+            (
+                sigma_tip,
+                source_stress,
+                lam,
+                lambda_site,
+                G,
+                n_source,
+                pt,
+                velocity,
+                encounter,
+            ) = rates
+
+            max_rate = max(
+                float(np.max(encounter)),
+                float(np.max(pt.taylor_net_s)),
+                self.material.state.retained_recovery_rate_s,
+                self.cfg.mobile_recovery_rate_s,
+                1.0e-30,
+            )
+            max_velocity = max(float(np.max(velocity)), 0.0)
+            total_emit_rate = max(float(np.sum(lam)), 0.0)
+
+            h = remaining
+            h = min(h, self.cfg.max_substep_rate_dt / max_rate)
+            if max_velocity > 0.0:
+                h = min(
+                    h,
+                    self.dx * self.cfg.max_advection_cfl / max_velocity,
+                )
+            if total_emit_rate > 0.0:
+                h = min(
+                    h,
+                    self.cfg.max_emit_increment_per_substep / total_emit_rate,
+                )
+            h = max(min(h, remaining), tiny)
+
+            n_substeps += 1
+            if n_substeps > int(self.cfg.max_substeps):
+                raise RuntimeError(
+                    "process-zone adaptive integration exceeded max_substeps; "
+                    "reduce the outer timestep or audit source/backstress kinetics"
+                )
+
+            emitted = np.asarray(lam, dtype=float) * h
+            self.mobile[:, 0] += emitted
+            self.emitted_total += float(np.sum(emitted))
+
             release = np.asarray(pt.taylor_net_s, dtype=float)
             for s in range(self.cfg.n_systems):
-                m = self.mobile[s]
-                r = self.retained[s]
-                dm = (-encounter * m + release * r - self.cfg.mobile_recovery_rate_s * m) * h
-                dr = (encounter * m - release * r - self.material.state.retained_recovery_rate_s * r) * h
-                self.mobile[s] = np.maximum(m + dm, 0.0)
-                self.retained[s] = np.maximum(r + dr, 0.0)
-                cfl = np.clip(velocity * h / max(self.dx, 1.0e-300), 0.0, 1.0)
-                flux = cfl * self.mobile[s]
-                escaped = float(flux[-1])
-                self.mobile[s, 1:] += flux[:-1]
-                self.mobile[s] -= flux
-                self.escaped_total += escaped
-        self.time_s += dt
-        return self._diagnostics(sigma_tip, source_stress, lam, G, pt, velocity, encounter, self.emitted_total - emitted_before, self.escaped_total - escaped_before)
+                m = self.mobile[s].copy()
+                r = self.retained[s].copy()
+                dm = (
+                    -encounter * m
+                    + release * r
+                    - self.cfg.mobile_recovery_rate_s * m
+                ) * h
+                dr = (
+                    encounter * m
+                    - release * r
+                    - self.material.state.retained_recovery_rate_s * r
+                ) * h
+                m = np.maximum(m + dm, 0.0)
+                r = np.maximum(r + dr, 0.0)
 
-    def _diagnostics(self, sigma_tip, source_stress, lam, G, pt, velocity, encounter, d_emit, d_escape=0.0):
+                cfl = np.clip(
+                    velocity * h / max(self.dx, 1.0e-300),
+                    0.0,
+                    1.0,
+                )
+                flux = cfl * m
+                # Each line-bin crossing contributes one increment to the
+                # irreversible glide ledger and therefore to crack-tip blunting.
+                self.slip_count[s] += flux
+                escaped = float(flux[-1])
+                m[1:] += flux[:-1]
+                m -= flux
+                self.mobile[s] = np.maximum(m, 0.0)
+                self.retained[s] = r
+                self.escaped_total += escaped
+
+            remaining -= h
+
+        self.time_s += dt
+        rates = self._rates(K_drive_Pa_sqrt_m, temperature_K)
+        return self._diagnostics(
+            *rates,
+            d_emit=self.emitted_total - emitted_before,
+            d_escape=self.escaped_total - escaped_before,
+            n_substeps=n_substeps,
+        )
+
+    def _diagnostics(
+        self,
+        sigma_tip,
+        source_stress,
+        lam,
+        lambda_site,
+        G,
+        n_source,
+        pt,
+        velocity,
+        encounter,
+        d_emit,
+        d_escape=0.0,
+        n_substeps=0,
+    ):
+        reload_limit = (
+            1.0 / self.cfg.source_reload_time_s
+            if self.cfg.source_reload_time_s > 0.0
+            else float("inf")
+        )
         return {
             "sigma_tip_Pa": float(sigma_tip),
             "source_stress_min_Pa": float(np.min(source_stress)),
             "source_stress_max_Pa": float(np.max(source_stress)),
             "source_backstress_max_Pa": float(np.max(self.source_backstress_Pa())),
+            "geometric_source_count_per_system": float(n_source),
+            "source_spacing_m": float(self.cfg.source_spacing_m),
+            "source_reload_time_s": float(self.cfg.source_reload_time_s),
+            "source_reload_rate_limit_s": float(reload_limit),
+            "lambda_site_max_s": float(np.max(lambda_site)),
             "lambda_emit_total_s": float(np.sum(lam)),
             "G_emit_min_eV": float(np.min(G)),
             "dN_emit": float(d_emit),
             "dN_escape": float(d_escape),
             "mobile_count": self.mobile_count,
             "retained_count": self.retained_count,
+            "local_slip_count": self.local_slip_count,
             "K_shield_Pa_sqrt_m": self.shielding_K_Pa_sqrt_m(),
             "r_eff_m": self.blunted_radius_m(),
+            "tip_radius_over_r0": self.blunted_radius_m() / self.cfg.r0_m,
+            "tip_radius_exceeds_process_zone": float(
+                self.blunted_radius_m() > self.cfg.length_m
+            ),
             "peierls_rate_max_s": float(np.max(pt.peierls_net_s)),
             "taylor_rate_max_s": float(np.max(pt.taylor_net_s)),
             "series_rate_max_s": float(np.max(pt.series_s)),
             "glide_velocity_max_m_s": float(np.max(velocity)),
             "encounter_rate_max_s": float(np.max(encounter)),
+            "process_zone_substeps": int(n_substeps),
             "source_inventory_active": 0.0,
             "source_refresh_active": 0.0,
+            "source_geometry_active": 1.0,
+            "mobile_source_backstress_active": float(
+                self.cfg.mobile_source_backstress_fraction > 0.0
+            ),
+            "mobile_direct_K_shielding_active": 0.0,
         }
 
     def advance(self, distance_m: float) -> dict[str, float]:
         distance = max(float(distance_m), 0.0)
         if distance == 0.0:
-            return {"wake_mobile": 0.0, "wake_retained": 0.0}
+            return {
+                "wake_mobile": 0.0,
+                "wake_retained": 0.0,
+                "wake_slip": 0.0,
+            }
         old_m = self.mobile.copy()
         old_r = self.retained.copy()
+        old_g = self.slip_count.copy()
         sample_x = self.x + distance
         for s in range(self.cfg.n_systems):
-            self.mobile[s] = np.interp(sample_x, self.x, old_m[s], left=0.0, right=0.0)
-            self.retained[s] = np.interp(sample_x, self.x, old_r[s], left=0.0, right=0.0)
-        return {"wake_mobile": float(old_m.sum() - self.mobile.sum()), "wake_retained": float(old_r.sum() - self.retained.sum())}
+            self.mobile[s] = np.interp(
+                sample_x,
+                self.x,
+                old_m[s],
+                left=0.0,
+                right=0.0,
+            )
+            self.retained[s] = np.interp(
+                sample_x,
+                self.x,
+                old_r[s],
+                left=0.0,
+                right=0.0,
+            )
+            self.slip_count[s] = np.interp(
+                sample_x,
+                self.x,
+                old_g[s],
+                left=0.0,
+                right=0.0,
+            )
+        return {
+            "wake_mobile": float(old_m.sum() - self.mobile.sum()),
+            "wake_retained": float(old_r.sum() - self.retained.sum()),
+            "wake_slip": float(old_g.sum() - self.slip_count.sum()),
+        }
