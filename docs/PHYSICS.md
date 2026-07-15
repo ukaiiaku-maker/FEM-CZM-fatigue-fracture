@@ -17,8 +17,8 @@ archived only for traceability and are never read by the active equations.
 
 Retained lines produce two distinct effects:
 
-1. a slip-system source backstress that reduces the stress entering the emission
-   barrier;
+1. a front-local, same-sign pile-up resistance that reduces the stress entering
+   the emission barrier;
 2. a direct unresolved `K_shield` contribution that reduces both emission and
    cleavage tip stresses.
 
@@ -34,9 +34,10 @@ reverse rates. Taylor completion has an uncapped density-dependent hit order.
 There is no Taylor stress-amplification cap, hit-order cap, mobile-density
 saturation, jump-length floor, or constitutive plastic-rate cap.
 
-## Signed backstress limitation
+## Backstress limitation
 
-The reduced process-zone kernel is a front-local signed-line approximation. A
-full 2-D implementation should evolve slip-system-resolved signed GND fields or
-a Nye tensor. Scalar total density may be used for Taylor forest resistance but
-must not be converted into a signed backstress.
+The reduced process-zone kernel is a same-sign pile-up approximation. It is not
+a signed 2-D GND or Nye-tensor formulation. The full 2-D implementation should
+evolve slip-system-resolved signed GND fields or a Nye tensor and resolve their
+stress tensor onto each source. Scalar total density may be used for Taylor
+forest resistance but must not be converted into a signed backstress.
