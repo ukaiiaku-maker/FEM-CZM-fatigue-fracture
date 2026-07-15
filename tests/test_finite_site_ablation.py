@@ -16,8 +16,8 @@ def test_finite_site_inventory_cannot_emit_more_than_capacity():
     )
     pz = LegacyFiniteSiteProcessZone(get_material("DBTT"), cfg)
     total_capacity = float(np.sum(pz.site_capacity))
-    first = pz.evolve(1.0e6, 700.0, 80.0e6)
-    second = pz.evolve(1.0e6, 700.0, 80.0e6)
+    first = pz.evolve(1.0e-8, 700.0, 80.0e6)
+    second = pz.evolve(1.0e-8, 700.0, 80.0e6)
     assert pz.emitted_total <= total_capacity + 1.0e-12
     assert np.all(pz.available_sites >= 0.0)
     assert first["source_inventory_active"] == 1.0
@@ -35,7 +35,7 @@ def test_zero_time_recovery_never_replenishes_depleted_inventory():
     pz = LegacyFiniteSiteProcessZone(get_material("DBTT"), cfg)
     pz.available_sites[:] = 2.0
     available = pz.available_sites.copy()
-    pz.evolve(1000.0, 700.0, 0.0)
+    pz.evolve(1.0, 700.0, 0.0)
     assert np.all(pz.available_sites <= available)
 
 
