@@ -4,6 +4,9 @@ No finite source inventory is present. Source population follows crack-tip
 geometry; repeat emission is limited by nucleation, reload, near-tip backstress,
 Peierls transport, Taylor release, recovery, escape and crack advance. Blunting
 is driven by accumulated glide rather than stationary mobile population.
+
+Directed emission uses a detailed-balance net rate. The zero-stress Arrhenius
+rate is a thermal attempt background, not a net source of same-sign lines.
 """
 from __future__ import annotations
 
@@ -58,7 +61,9 @@ class ReusableSourceProcessZone:
         self.material = material
         self.cfg = config or ProcessZoneConfig()
         if self.cfg.n_bins < 4 or self.cfg.n_systems < 1:
-            raise ValueError("process zone requires at least four bins and one slip system")
+            raise ValueError(
+                "process zone requires at least four bins and one slip system"
+            )
         if self.cfg.source_spacing_m <= 0.0:
             raise ValueError("source spacing must be positive")
         if self.cfg.source_reload_time_s < 0.0:
@@ -67,7 +72,9 @@ class ReusableSourceProcessZone:
             raise ValueError("background forest density cannot be negative")
         self.dx = self.cfg.length_m / self.cfg.n_bins
         self.x = (np.arange(self.cfg.n_bins, dtype=float) + 0.5) * self.dx
-        self.mobile = np.zeros((self.cfg.n_systems, self.cfg.n_bins), dtype=float)
+        self.mobile = np.zeros(
+            (self.cfg.n_systems, self.cfg.n_bins), dtype=float
+        )
         self.retained = np.zeros_like(self.mobile)
         self.slip_count = np.zeros_like(self.mobile)
         self.emitted_total = 0.0
@@ -94,7 +101,9 @@ class ReusableSourceProcessZone:
 
     @property
     def local_slip_count(self) -> float:
-        weights = np.exp(-self.x / max(0.2 * self.cfg.length_m, self.dx))
+        weights = np.exp(
+            -self.x / max(0.2 * self.cfg.length_m, self.dx)
+        )
         return float(np.sum(self.slip_count * weights[None, :]))
 
     def blunted_radius_m(self) -> float:
@@ -177,6 +186,13 @@ class ReusableSourceProcessZone:
             2.0 * math.pi * max(self.blunted_radius_m(), 1.0e-300)
         )
 
+    @staticmethod
+    def _reload_limited(rate_s, reload_time_s: float):
+        rate = np.maximum(np.asarray(rate_s, dtype=float), 0.0)
+        if reload_time_s <= 0.0:
+            return rate
+        return rate / (1.0 + rate * reload_time_s)
+
     def _rates(self, K_drive_Pa_sqrt_m: float, temperature_K: float):
         sigma_tip = self.effective_tip_stress_Pa(K_drive_Pa_sqrt_m)
         source_stress = np.maximum(
@@ -184,20 +200,34 @@ class ReusableSourceProcessZone:
             - self.source_backstress_Pa(),
             0.0,
         )
-        lambda_site, G_emit = arrhenius_rate_s(
+
+        # Detailed-balance directed source rate. At zero source stress the
+        # forward and reverse thermal attempt rates are identical, so net
+        # same-sign emission is exactly zero.
+        lambda_forward, G_emit = arrhenius_rate_s(
             source_stress,
             temperature_K,
             self.material.emission,
             1.0e11,
         )
+        lambda_reverse, _ = arrhenius_rate_s(
+            np.zeros_like(source_stress),
+            temperature_K,
+            self.material.emission,
+            1.0e11,
+        )
         tau_reload = self.cfg.source_reload_time_s
-        lambda_reusable = (
-            lambda_site / (1.0 + lambda_site * tau_reload)
-            if tau_reload > 0.0
-            else lambda_site
+        forward_reusable = self._reload_limited(
+            lambda_forward, tau_reload
+        )
+        reverse_reusable = self._reload_limited(
+            lambda_reverse, tau_reload
+        )
+        lambda_site_net = np.maximum(
+            forward_reusable - reverse_reusable, 0.0
         )
         n_source = self.geometric_source_count_per_system()
-        lambda_emit = n_source * lambda_reusable
+        lambda_emit = n_source * lambda_site_net
 
         rho_f = self.forest_density_m2
         rho_m = self.mobile_density_m2
@@ -219,7 +249,9 @@ class ReusableSourceProcessZone:
             sigma_tip,
             source_stress,
             lambda_emit,
-            lambda_site,
+            lambda_forward,
+            lambda_reverse,
+            lambda_site_net,
             G_emit,
             n_source,
             pt,
@@ -267,7 +299,9 @@ class ReusableSourceProcessZone:
                 sigma_tip,
                 source_stress,
                 lam,
-                lambda_site,
+                lambda_forward,
+                lambda_reverse,
+                lambda_site_net,
                 G,
                 n_source,
                 pt,
@@ -277,7 +311,9 @@ class ReusableSourceProcessZone:
 
             total_emit_rate = max(float(np.sum(lam)), 0.0)
             mobile_by_bin = self.mobile.sum(axis=0)
-            active = mobile_by_bin > self.cfg.population_activity_floor
+            active = (
+                mobile_by_bin > self.cfg.population_activity_floor
+            )
             active_velocity = (
                 float(np.max(velocity[active])) if np.any(active) else 0.0
             )
@@ -286,12 +322,14 @@ class ReusableSourceProcessZone:
             if active_velocity > 0.0:
                 h = min(
                     h,
-                    self.dx * self.cfg.max_advection_cfl / active_velocity,
+                    self.dx * self.cfg.max_advection_cfl
+                    / active_velocity,
                 )
             if total_emit_rate > 0.0:
                 h = min(
                     h,
-                    self.cfg.max_emit_increment_per_substep / total_emit_rate,
+                    self.cfg.max_emit_increment_per_substep
+                    / total_emit_rate,
                 )
             h = max(min(h, remaining), tiny)
 
@@ -317,11 +355,18 @@ class ReusableSourceProcessZone:
                 )
                 if self.cfg.mobile_recovery_rate_s > 0.0:
                     m *= math.exp(
-                        -min(self.cfg.mobile_recovery_rate_s * h, 700.0)
+                        -min(
+                            self.cfg.mobile_recovery_rate_s * h,
+                            700.0,
+                        )
                     )
-                retained_recovery = self.material.state.retained_recovery_rate_s
+                retained_recovery = (
+                    self.material.state.retained_recovery_rate_s
+                )
                 if retained_recovery > 0.0:
-                    r *= math.exp(-min(retained_recovery * h, 700.0))
+                    r *= math.exp(
+                        -min(retained_recovery * h, 700.0)
+                    )
 
                 cfl = np.clip(
                     velocity * h / max(self.dx, 1.0e-300),
@@ -353,7 +398,9 @@ class ReusableSourceProcessZone:
         sigma_tip,
         source_stress,
         lam,
-        lambda_site,
+        lambda_forward,
+        lambda_reverse,
+        lambda_site_net,
         G,
         n_source,
         pt,
@@ -378,10 +425,23 @@ class ReusableSourceProcessZone:
             ),
             "geometric_source_count_per_system": float(n_source),
             "source_spacing_m": float(self.cfg.source_spacing_m),
-            "source_reload_time_s": float(self.cfg.source_reload_time_s),
+            "source_reload_time_s": float(
+                self.cfg.source_reload_time_s
+            ),
             "source_reload_rate_limit_s": float(reload_limit),
-            "lambda_site_max_s": float(np.max(lambda_site)),
+            # Backward-compatible name now reports the net directed site rate.
+            "lambda_site_max_s": float(np.max(lambda_site_net)),
+            "lambda_site_forward_max_s": float(
+                np.max(lambda_forward)
+            ),
+            "lambda_site_reverse_max_s": float(
+                np.max(lambda_reverse)
+            ),
+            "lambda_site_net_max_s": float(
+                np.max(lambda_site_net)
+            ),
             "lambda_emit_total_s": float(np.sum(lam)),
+            "zero_stress_net_emission_active": 1.0,
             "G_emit_min_eV": float(np.min(G)),
             "dN_emit": float(d_emit),
             "dN_escape": float(d_escape),
@@ -392,16 +452,24 @@ class ReusableSourceProcessZone:
                 self.cfg.background_forest_density_m2
             ),
             "process_zone_width_m": self.process_zone_width_m(),
-            "forest_density_max_m2": float(np.max(self.forest_density_m2)),
-            "mobile_density_max_m2": float(np.max(self.mobile_density_m2)),
+            "forest_density_max_m2": float(
+                np.max(self.forest_density_m2)
+            ),
+            "mobile_density_max_m2": float(
+                np.max(self.mobile_density_m2)
+            ),
             "K_shield_Pa_sqrt_m": self.shielding_K_Pa_sqrt_m(),
             "r_eff_m": radius,
             "tip_radius_over_r0": radius / self.cfg.r0_m,
             "tip_radius_exceeds_process_zone": float(
                 radius > self.cfg.length_m
             ),
-            "peierls_rate_max_s": float(np.max(pt.peierls_net_s)),
-            "taylor_rate_max_s": float(np.max(pt.taylor_net_s)),
+            "peierls_rate_max_s": float(
+                np.max(pt.peierls_net_s)
+            ),
+            "taylor_rate_max_s": float(
+                np.max(pt.taylor_net_s)
+            ),
             "series_rate_max_s": float(np.max(pt.series_s)),
             "glide_velocity_max_m_s": float(np.max(velocity)),
             "encounter_rate_max_s": float(np.max(encounter)),
@@ -431,16 +499,34 @@ class ReusableSourceProcessZone:
         sample_x = self.x + distance
         for s in range(self.cfg.n_systems):
             self.mobile[s] = np.interp(
-                sample_x, self.x, old_m[s], left=0.0, right=0.0
+                sample_x,
+                self.x,
+                old_m[s],
+                left=0.0,
+                right=0.0,
             )
             self.retained[s] = np.interp(
-                sample_x, self.x, old_r[s], left=0.0, right=0.0
+                sample_x,
+                self.x,
+                old_r[s],
+                left=0.0,
+                right=0.0,
             )
             self.slip_count[s] = np.interp(
-                sample_x, self.x, old_g[s], left=0.0, right=0.0
+                sample_x,
+                self.x,
+                old_g[s],
+                left=0.0,
+                right=0.0,
             )
         return {
-            "wake_mobile": float(old_m.sum() - self.mobile.sum()),
-            "wake_retained": float(old_r.sum() - self.retained.sum()),
-            "wake_slip": float(old_g.sum() - self.slip_count.sum()),
+            "wake_mobile": float(
+                old_m.sum() - self.mobile.sum()
+            ),
+            "wake_retained": float(
+                old_r.sum() - self.retained.sum()
+            ),
+            "wake_slip": float(
+                old_g.sum() - self.slip_count.sum()
+            ),
         }
