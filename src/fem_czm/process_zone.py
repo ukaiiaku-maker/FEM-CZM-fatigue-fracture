@@ -43,7 +43,9 @@ class ProcessZoneConfig:
 
     mobile_recovery_rate_s: float = 0.0
     max_advection_cfl: float = 0.25
-    max_emit_increment_per_substep: float = 0.25
+    # Numerical tolerance, not a physical emission cap. Rates and backstress are
+    # recomputed after each increment; convergence should be checked by reducing it.
+    max_emit_increment_per_substep: float = 5.0
     population_activity_floor: float = 1.0e-12
     max_substeps: int = 100_000
 
