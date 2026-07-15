@@ -15,6 +15,23 @@ def test_no_source_counter_or_refresh_state():
     assert out["source_geometry_active"] == 1.0
 
 
+def test_zero_source_stress_has_zero_net_directed_emission():
+    pz = ReusableSourceProcessZone(
+        get_material("DBTT"),
+        ProcessZoneConfig(n_bins=20),
+    )
+    out = pz.evolve(1000.0, 700.0, 0.0)
+    assert out["lambda_site_forward_max_s"] > 0.0
+    assert np.isclose(
+        out["lambda_site_forward_max_s"],
+        out["lambda_site_reverse_max_s"],
+    )
+    assert out["lambda_site_net_max_s"] == 0.0
+    assert out["lambda_emit_total_s"] == 0.0
+    assert out["dN_emit"] == 0.0
+    assert pz.mobile_count == 0.0
+
+
 def test_retained_lines_create_shielding_and_backstress():
     pz = ReusableSourceProcessZone(
         get_material("DBTT"),
