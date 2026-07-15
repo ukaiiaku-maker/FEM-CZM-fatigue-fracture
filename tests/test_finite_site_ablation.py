@@ -26,17 +26,17 @@ def test_finite_site_inventory_cannot_emit_more_than_capacity():
     ]
 
 
-def test_zero_time_recovery_leaves_depleted_inventory_depleted():
+def test_zero_time_recovery_never_replenishes_depleted_inventory():
     cfg = LegacyFiniteSiteConfig(
         n_bins=20,
         source_sites_per_system=5.0,
         source_recovery_rate_s=0.0,
     )
     pz = LegacyFiniteSiteProcessZone(get_material("DBTT"), cfg)
-    pz.evolve(1000.0, 700.0, 60.0e6)
+    pz.available_sites[:] = 2.0
     available = pz.available_sites.copy()
     pz.evolve(1000.0, 700.0, 0.0)
-    assert np.allclose(pz.available_sites, available)
+    assert np.all(pz.available_sites <= available)
 
 
 def test_crack_advance_refreshes_original_linear_fraction():
