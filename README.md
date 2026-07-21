@@ -22,14 +22,33 @@ output directory directly.
 
 ## Install from GitHub
 
-Install the current analysis branch directly:
+Install the current analysis branch directly. `pip` is listed explicitly because
+minimal Conda Python environments do not necessarily include it.
 
 ```bash
-conda create -n fem-czm-analysis python=3.12 -y
+conda create -n fem-czm-analysis -c conda-forge python=3.12 pip -y
 conda activate fem-czm-analysis
 
 python -m pip install \
   "git+https://github.com/ukaiiaku-maker/FEM-CZM-fatigue-fracture.git@analysis-k-vs-t-v1"
+```
+
+To repair an existing environment that was created without `pip`:
+
+```bash
+conda install -n fem-czm-analysis -c conda-forge pip -y
+conda activate fem-czm-analysis
+
+python -m pip install \
+  "git+https://github.com/ukaiiaku-maker/FEM-CZM-fatigue-fracture.git@analysis-k-vs-t-v1"
+```
+
+Confirm that the installed console entry is visible:
+
+```bash
+python -m pip show fem-czm-fatigue-fracture
+command -v fem-czm-plot-k-vs-t
+fem-czm-plot-k-vs-t --help
 ```
 
 For an editable development checkout:
@@ -41,6 +60,8 @@ git clone \
   https://github.com/ukaiiaku-maker/FEM-CZM-fatigue-fracture.git
 
 cd FEM-CZM-fatigue-fracture
+conda env create -f environment-analysis.yml
+conda activate fem-czm-analysis
 python -m pip install -e '.[dev]'
 pytest -q
 ```
